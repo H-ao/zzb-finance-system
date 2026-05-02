@@ -21,7 +21,7 @@ export async function apiCall<T>(
   const { maxRetries = 3, retryDelay = 800, errorMessage = "操作失败" } = options;
   
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try:
+    try {
       return await fn();
     } catch (error) {
       const isLastAttempt = attempt === maxRetries;

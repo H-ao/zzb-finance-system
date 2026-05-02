@@ -2,110 +2,13 @@ import { useMemo, useState, useEffect } from "react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { Briefcase, Loader2, AlertCircle } from "lucide-react";
 import { formatCNY } from "@/lib/format";
+import { useLedger } from "@/contexts/LedgerContext";
 
 interface ApiBusinessSummary {
   total_estimated_profit: number;
   total_estimated_rev: number;
   total_cost: number;
   record_count: number;
-}
-
-export function BusinessSummaryCard() {
-  const [data, setData] = useState<ApiBusinessSummary | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    async function fetchData() {
-      setLoading(true);
-      setError(null);
-      try {
-        const response = await fetch("/api/dashboard/business_summary");
-        if (!response.ok) {
-          throw new Error("API 请求失败");
-        }
-        const result = await response.json();
-        setData(result);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "网络错误");
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchData();
-  }, []);
-
-  if (loading) {
-    return (
-      <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
-        <div className="flex items-center justify-center py-8">
-          <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
-        <div className="flex items-center gap-2 text-muted-foreground">
-          <AlertCircle className="h-5 w-5" />
-          <span>{error}</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!data || data.record_count === 0) {
-    return (
-      <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
-        <div className="flex items-center gap-2">
-          <Briefcase className="h-5 w-5 text-muted-foreground" />
-          <h3 className="text-base font-semibold">业务预估总收益</h3>
-        </div>
-        <div className="mt-4 text-center text-sm text-muted-foreground">
-          暂无业务核算数据
-        </div>
-      </div>
-    );
-  }
-
-  const profit = data.total_estimated_rev - data.total_cost;
-
-  return (
-    <div className="rounded-xl border border-border bg-card p-6 shadow-[var(--shadow-card)]">
-      <div className="flex items-center gap-2">
-        <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary-soft text-primary">
-          <Briefcase className="h-3.5 w-3.5" />
-        </div>
-        <div className="flex-1">
-          <h3 className="text-base font-semibold">业务预估总收益</h3>
-          <p className="text-[11px] text-muted-foreground">
-            {data.record_count} 条记录
-          </p>
-        </div>
-      </div>
-
-      <div className="mt-4">
-        <div className="text-2xl font-semibold tabular-nums" style={{ color: "hsl(var(--income))" }}>
-          {formatCNY(data.total_estimated_rev)}
-        </div>
-        <div className="mt-0.5 text-xs text-muted-foreground">预估回款总额</div>
-      </div>
-
-      <div className="mt-3">
-        <div className="text-base font-semibold tabular-nums text-muted-foreground">
-          {formatCNY(data.total_cost)}
-        </div>
-        <div className="mt-0.5 text-xs text-muted-foreground">
-          发货总成本 · 预估毛利{" "}
-          <span style={{ color: profit >= 0 ? "hsl(var(--income))" : "hsl(var(--expense))" }}>
-            {formatCNY(profit, { sign: true })}
-          </span>
-        </div>
-      </div>
-    </div>
-  );
 }
 
 export function BusinessSummaryCard() {
