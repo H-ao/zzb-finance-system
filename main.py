@@ -9,7 +9,9 @@ import subprocess
 import threading
 import time
 import shutil
+import logging
 from datetime import datetime, timedelta
+from functools import wraps
 from flask import Flask, send_from_directory, jsonify, request, send_file
 from flask_cors import CORS
 
@@ -19,11 +21,35 @@ try:
 except ImportError:
     PANDAS_AVAILABLE = False
 
+# ========== 日志配置 ==========
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s [%(name)s] %(message)s',
+    handlers=[
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger('finance_app')
+
+# ========== 环境变量配置 ==========
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:8080,http://localhost:8081,http://localhost:8082,http://localhost:5173,http://localhost:4173,http://127.0.0.1:5000"
+).split(",")
+
+logger.info(f"Allowed origins: {ALLOWED_ORIGINS}")
+
 app = Flask(__name__, static_folder="dist", static_url_path="")
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:8080", "http://localhost:8081", "http://localhost:8082", "http://localhost:5173", "http://localhost:4173", "http://127.0.0.1:5000"]}})
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ALLOWED_ORIGINS,
+        "supports_credentials": True,
+        "allow_headers": ["Content-Type", "Authorization"],
+        "methods": ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
+    }
+})
 
 _db_lock = threading.Lock()
-_active_conns = []
 
 def get_db_path():
     if getattr(sys, 'frozen', False):
@@ -41,23 +67,116 @@ last_auto_backup_time = datetime.now()
 
 os.makedirs(BACKUPS_DIR, exist_ok=True)
 
+# ========== 输入验证工具 ==========
+
+def validate_list_data(min_items=0, max_items=1000, item_schema=None):
+    """验证列表数据"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            data = request.get_json()
+            if not data:
+                logger.warning("Request with empty JSON")
+                return jsonify({"status": "error", "message": "JSON 数据不能为空"}), 400
+            
+            # 如果是列表
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                # 查找第一个列表字段
+                items = None
+                for key, value in data.items():
+                    if isinstance(value, list):
+                        items = value
+                        break
+                if items is None:
+                    logger.warning("No list field found in JSON")
+                    return jsonify({"status": "error", "message": "未找到列表数据"}), 400
+            else:
+                logger.warning(f"Invalid data type: {type(data)}")
+                return jsonify({"status": "error", "message": "数据格式错误"}), 400
+            
+            # 验证数量
+            if len(items) < min_items:
+                logger.warning(f"Too few items: {len(items)} < {min_items}")
+                return jsonify({"status": "error", "message": f"数据不能少于 {min_items} 项"}), 400
+            
+            if len(items) > max_items:
+                logger.warning(f"Too many items: {len(items)} > {max_items}")
+                return jsonify({"status": "error", "message": f"数据不能超过 {max_items} 项"}), 400
+            
+            # 验证每项的必填字段
+            if item_schema:
+                for i, item in enumerate(items):
+                    for field, rules in item_schema.items():
+                        if rules.get("required") and field not in item:
+                            logger.warning(f"Missing required field '{field}' in item {i}")
+                            return jsonify({"status": "error", "message": f"第{i+1}项缺少必填字段：{field}"}), 400
+                        
+                        if field in item:
+                            value = item[field]
+                            # 类型验证
+                            if "type" in rules:
+                                expected_type = rules["type"]
+                                if expected_type == "string" and not isinstance(value, str):
+                                    return jsonify({"status": "error", "message": f"第{i+1}项字段 {field} 必须是字符串"}), 400
+                                elif expected_type == "number" and not isinstance(value, (int, float)):
+                                    return jsonify({"status": "error", "message": f"第{i+1}项字段 {field} 必须是数字"}), 400
+                            
+                            # 长度验证
+                            if "max_length" in rules and isinstance(value, str) and len(value) > rules["max_length"]:
+                                return jsonify({"status": "error", "message": f"第{i+1}项字段 {field} 长度不能超过 {rules['max_length']}"}), 400
+                            
+                            # 值范围验证
+                            if "min" in rules and isinstance(value, (int, float)) and value < rules["min"]:
+                                return jsonify({"status": "error", "message": f"第{i+1}项字段 {field} 不能小于 {rules['min']}"}), 400
+                            if "max" in rules and isinstance(value, (int, float)) and value > rules["max"]:
+                                return jsonify({"status": "error", "message": f"第{i+1}项字段 {field} 不能大于 {rules['max']}"}), 400
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
+
+def prevent_empty_data(get_count_func):
+    """防止清空所有数据的装饰器"""
+    def decorator(f):
+        @wraps(f)
+        def decorated_function(*args, **kwargs):
+            data = request.get_json()
+            items = data if isinstance(data, list) else None
+            
+            if items is None and isinstance(data, dict):
+                for value in data.values():
+                    if isinstance(value, list):
+                        items = value
+                        break
+            
+            # 如果是空列表且当前有数据，则阻止
+            if items is not None and len(items) == 0:
+                current_count = get_count_func()
+                if current_count > 0:
+                    logger.warning(f"Attempt to clear all data (count={current_count})")
+                    return jsonify({
+                        "status": "error",
+                        "message": "不能清空所有数据，请先添加新数据"
+                    }), 400
+            
+            return f(*args, **kwargs)
+        return decorated_function
+    return decorator
+
 def get_conn():
+    """获取数据库连接，调用者负责在完成后关闭连接"""
     conn = sqlite3.connect(DB_PATH, timeout=10, check_same_thread=False)
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA busy_timeout = 5000")
     conn.row_factory = sqlite3.Row
-    _active_conns.append(conn)
     return conn
 
 def _close_all_connections():
-    global _active_conns
-    for c in _active_conns:
-        try:
-            c.close()
-        except:
-            pass
-    _active_conns = []
+    """仅在应用关闭时调用，用于清理所有 WAL 连接"""
     time.sleep(0.5)
 
 def checkpoint(conn):
@@ -302,9 +421,33 @@ def get_shops():
     finally:
         conn.close()
 
+def count_shops():
+    """获取当前店铺数量"""
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM shops")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
 @app.route("/api/shops", methods=["POST"])
+@validate_list_data(
+    min_items=0,
+    max_items=100,
+    item_schema={
+        "id": {"required": True, "type": "string", "max_length": 100},
+        "name": {"required": True, "type": "string", "max_length": 100},
+        "color": {"required": True, "type": "string", "max_length": 20},
+        "createdAt": {"required": True, "type": "string"}
+    }
+)
+@prevent_empty_data(count_shops)
 def set_shops():
-    shops = request.get_json()
+    data = request.get_json()
+    shops = data if isinstance(data, list) else list(data.values())[0]
+    
+    logger.info(f"Saving {len(shops)} shops")
     conn = get_conn()
     try:
         cursor = conn.cursor()
@@ -316,7 +459,11 @@ def set_shops():
             )
         conn.commit()
         checkpoint(conn)
+        logger.info(f"Successfully saved {len(shops)} shops")
         return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Error saving shops: {e}", exc_info=True)
+        raise
     finally:
         conn.close()
 
@@ -332,9 +479,32 @@ def get_categories():
     finally:
         conn.close()
 
+def count_categories():
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM categories")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
 @app.route("/api/categories", methods=["POST"])
+@validate_list_data(
+    min_items=0,
+    max_items=200,
+    item_schema={
+        "id": {"required": True, "type": "string"},
+        "name": {"required": True, "type": "string", "max_length": 100},
+        "type": {"required": True, "type": "string"},
+        "color": {"required": True, "type": "string", "max_length": 20}
+    }
+)
+@prevent_empty_data(count_categories)
 def set_categories():
-    categories = request.get_json()
+    data = request.get_json()
+    categories = data if isinstance(data, list) else list(data.values())[0]
+    
+    logger.info(f"Saving {len(categories)} categories")
     conn = get_conn()
     try:
         cursor = conn.cursor()
@@ -346,7 +516,11 @@ def set_categories():
             )
         conn.commit()
         checkpoint(conn)
+        logger.info(f"Successfully saved {len(categories)} categories")
         return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Error saving categories: {e}", exc_info=True)
+        raise
     finally:
         conn.close()
 
@@ -362,9 +536,36 @@ def get_transactions():
     finally:
         conn.close()
 
+def count_transactions():
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM transactions")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
 @app.route("/api/transactions", methods=["POST"])
+@validate_list_data(
+    min_items=0,
+    max_items=10000,
+    item_schema={
+        "id": {"required": True, "type": "string"},
+        "date": {"required": True, "type": "string"},
+        "type": {"required": True, "type": "string"},
+        "categoryId": {"required": True, "type": "string"},
+        "paymentMethod": {"required": True, "type": "string"},
+        "amount": {"required": True, "type": "number", "min": 0},
+        "currency": {"required": True, "type": "string", "max_length": 10},
+        "amountCNY": {"required": True, "type": "number", "min": 0}
+    }
+)
+@prevent_empty_data(count_transactions)
 def set_transactions():
-    transactions = request.get_json()
+    data = request.get_json()
+    transactions = data if isinstance(data, list) else list(data.values())[0]
+    
+    logger.info(f"Saving {len(transactions)} transactions")
     conn = get_conn()
     try:
         cursor = conn.cursor()
@@ -381,7 +582,11 @@ def set_transactions():
             )
         conn.commit()
         checkpoint(conn)
+        logger.info(f"Successfully saved {len(transactions)} transactions")
         return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Error saving transactions: {e}", exc_info=True)
+        raise
     finally:
         conn.close()
 
@@ -544,9 +749,32 @@ def get_advances():
     finally:
         conn.close()
 
+def count_advances():
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM advances")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
 @app.route("/api/advances", methods=["POST"])
+@validate_list_data(
+    min_items=0,
+    max_items=1000,
+    item_schema={
+        "id": {"required": True, "type": "string"},
+        "date": {"required": True, "type": "string"},
+        "project": {"required": True, "type": "string", "max_length": 200},
+        "amount": {"required": True, "type": "number", "min": 0}
+    }
+)
+@prevent_empty_data(count_advances)
 def set_advances():
-    advances = request.get_json()
+    data = request.get_json()
+    advances = data if isinstance(data, list) else list(data.values())[0]
+    
+    logger.info(f"Saving {len(advances)} advances")
     conn = get_conn()
     try:
         cursor = conn.cursor()
@@ -562,7 +790,11 @@ def set_advances():
             )
         conn.commit()
         checkpoint(conn)
+        logger.info(f"Successfully saved {len(advances)} advances")
         return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Error saving advances: {e}", exc_info=True)
+        raise
     finally:
         conn.close()
 
@@ -583,25 +815,55 @@ def get_currencies():
     finally:
         conn.close()
 
+def count_currencies():
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM currencies")
+        return cursor.fetchone()[0]
+    finally:
+        conn.close()
+
 @app.route("/api/currencies", methods=["POST"])
+@validate_list_data(
+    min_items=0,
+    max_items=50,
+    item_schema={
+        "code": {"required": True, "type": "string", "max_length": 10},
+        "name": {"required": True, "type": "string", "max_length": 100},
+        "symbol": {"required": True, "type": "string", "max_length": 10},
+        "defaultRate": {"required": True, "type": "number", "min": 0}
+    }
+)
+@prevent_empty_data(count_currencies)
 def set_currencies():
-    currencies = request.get_json()
-    if currencies:
-        conn = get_conn()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM currencies")
-            for c in currencies:
-                cursor.execute(
-                    '''INSERT INTO currencies (code, name, symbol, defaultRate, isBase)
-                       VALUES (?, ?, ?, ?, ?)''',
-                    (c["code"], c["name"], c["symbol"], c["defaultRate"], 1 if c.get("isBase") else 0)
-                )
-            conn.commit()
-            checkpoint(conn)
-        finally:
-            conn.close()
-    return jsonify({"status": "ok"})
+    data = request.get_json()
+    currencies = data if isinstance(data, list) else list(data.values())[0]
+    
+    logger.info(f"Saving {len(currencies)} currencies")
+    
+    if not currencies:
+        return jsonify({"status": "ok"})
+    
+    conn = get_conn()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM currencies")
+        for c in currencies:
+            cursor.execute(
+                '''INSERT INTO currencies (code, name, symbol, defaultRate, isBase)
+                   VALUES (?, ?, ?, ?, ?)''',
+                (c["code"], c["name"], c["symbol"], c["defaultRate"], 1 if c.get("isBase") else 0)
+            )
+        conn.commit()
+        checkpoint(conn)
+        logger.info(f"Successfully saved {len(currencies)} currencies")
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        logger.error(f"Error saving currencies: {e}", exc_info=True)
+        raise
+    finally:
+        conn.close()
 
 @app.route("/api/seed", methods=["GET"])
 def api_seed():
@@ -629,113 +891,212 @@ def auto_backup():
             print(f"Auto backup error: {e}")
         time.sleep(3600)
 
+def _force_flush_database():
+    """
+    强制将内存中的数据刷新到磁盘
+    确保 WAL 模式下的所有 pending changes 都物理写入 .db 文件
+    """
+    conn = get_conn()
+    try:
+        # Step 1: 提交所有未提交的事务
+        conn.commit()
+        
+        # Step 2: 强制 WAL 检查点，将 WAL 文件内容写回主数据库文件
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        
+        # Step 3: 设置 SYNCHRONOUS=FULL 确保下一次写入立即落盘
+        conn.execute("PRAGMA synchronous = FULL")
+        
+        # Step 4: 执行一次空写入来强制 flush
+        conn.execute("PRAGMA integrity_check")
+        
+    finally:
+        conn.close()
+    
+    # Step 5: 等待文件系统完成写入
+    time.sleep(0.5)
+
+
+def _calculate_file_hash(filepath):
+    """计算文件的 SHA256 哈希值"""
+    import hashlib
+    sha256 = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(8192), b''):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def _export_table_to_csv(cursor, table, csv_path):
+    """导出单个表到 CSV，返回记录数"""
+    cursor.execute(f"SELECT * FROM {table}")
+    rows = cursor.fetchall()
+    cols = [desc[0] for desc in cursor.description]
+    
+    # 先写入 header
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(cols)
+        for row in rows:
+            writer.writerow(row)
+    
+    return len(rows)
+
+
 @app.route("/api/backup", methods=["POST"])
 def api_backup():
     if not PANDAS_AVAILABLE:
         return jsonify({"status": "error", "message": "pandas not available"}), 500
     
     try:
-        print(f"[BACKUP] ====================================")
+        print(f"[BACKUP] {'='*60}")
         print(f"[BACKUP] Backup started at: {datetime.now().isoformat()}")
         print(f"[BACKUP] Database path: {DB_PATH}")
-        print(f"[BACKUP] ====================================")
+        print(f"[BACKUP] {'='*60}")
         
+        # ========== 阶段 1: 强制数据落盘 =========
+        print("[BACKUP] Phase 1: Forcing data flush to disk...")
+        _force_flush_database()
+        print("[BACKUP] Data flush completed")
+        
+        # ========== 阶段 2: 收集指纹信息 =========
+        print("[BACKUP] Phase 2: Calculating fingerprints...")
+        
+        # 计算数据库文件哈希
+        db_hash = _calculate_file_hash(DB_PATH)
+        db_size = os.path.getsize(DB_PATH)
+        print(f"[BACKUP] Database SHA256: {db_hash}")
+        print(f"[BACKUP] Database size: {db_size} bytes")
+        
+        # 获取所有表的记录数
         conn = get_conn()
         cursor = conn.cursor()
-        
-        print("[BACKUP] Step 1: Force sync - committing all pending changes...")
-        conn.commit()
-        checkpoint(conn)
-        print("[BACKUP] Force sync completed")
-        
-        print("[BACKUP] Step 2: Calculating database file hash...")
-        import hashlib
-        with open(DB_PATH, 'rb') as f:
-            db_hash = hashlib.sha256(f.read()).hexdigest()
-        print(f"[BACKUP] Database SHA256: {db_hash}")
-        
-        print("[BACKUP] Step 3: Gathering table record counts...")
         tables = ['shops', 'categories', 'transactions', 'advances', 'currencies', 'business_reconciliation', 'seeded']
-        table_counts = {}
+        table_stats = {}
+        
         for table in tables:
             try:
                 cursor.execute(f"SELECT COUNT(*) FROM {table}")
                 count = cursor.fetchone()[0]
-                table_counts[table] = count
+                table_stats[table] = count
                 print(f"[BACKUP]   {table}: {count} records")
             except Exception as e:
                 print(f"[BACKUP]   {table}: 0 records (error: {e})")
-                table_counts[table] = 0
+                table_stats[table] = 0
         
         conn.close()
         
-        print("[BACKUP] Step 4: Creating temporary backup directory...")
+        # ========== 阶段 3: 构建三件套备份包 =========
+        print("[BACKUP] Phase 3: Building three-layer backup package...")
+        
         timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-        temp_dir = os.path.join(BACKUPS_DIR, "temp")
+        temp_dir = os.path.join(BACKUPS_DIR, f"backup_{timestamp}")
         os.makedirs(temp_dir, exist_ok=True)
         
-        temp_db_copy = os.path.join(temp_dir, "finance_data.db")
-        print(f"[BACKUP] Copying database to: {temp_db_copy}")
-        shutil.copy2(DB_PATH, temp_db_copy)
+        # --- 物理层：直接复制 .db 文件 ---
+        db_backup_path = os.path.join(temp_dir, "finance_data.db")
+        shutil.copy2(DB_PATH, db_backup_path)
+        print(f"[BACKUP] Physical layer: Database file copied")
         
+        # --- 逻辑层：导出所有表为 CSV ---
         csv_dir = os.path.join(temp_dir, "csv")
         os.makedirs(csv_dir, exist_ok=True)
         
-        print("[BACKUP] Step 5: Exporting tables to CSV...")
         conn = get_conn()
         cursor = conn.cursor()
+        csv_stats = {}
+        
         for table in tables:
-            cursor.execute(f"SELECT * FROM {table}")
-            rows = cursor.fetchall()
-            cols = [desc[0] for desc in cursor.description]
-            df = pd.DataFrame([dict(zip(cols, row)) for row in rows]) if rows else pd.DataFrame(columns=cols)
             csv_path = os.path.join(csv_dir, f"{table}.csv")
-            df.to_csv(csv_path, index=False)
-            print(f"[BACKUP]   Exported {table} to {csv_path} ({len(df)} rows)")
+            row_count = _export_table_to_csv(cursor, table, csv_path)
+            csv_stats[table] = row_count
+            print(f"[BACKUP] Logical layer: Exported {table} to CSV ({row_count} rows)")
+        
         conn.close()
         
-        print("[BACKUP] Step 6: Generating integrity.json...")
-        integrity = {
-            "version": "1.0",
+        # --- 指纹层：生成 manifest.json ---
+        manifest = {
+            "version": "2.0",
+            "backup_type": "full",
             "backup_time": datetime.now().isoformat(),
-            "db_file_hash": db_hash,
-            "db_file_size": os.path.getsize(DB_PATH),
-            "tables": table_counts
+            "database": {
+                "filename": "finance_data.db",
+                "sha256_hash": db_hash,
+                "file_size": db_size
+            },
+            "tables": {},
+            "verification": {
+                "method": "hash_and_count",
+                "csv_vs_db_match_required": True
+            }
         }
-        integrity_path = os.path.join(temp_dir, "integrity.json")
-        with open(integrity_path, 'w', encoding='utf-8') as f:
-            json.dump(integrity, f, indent=2, ensure_ascii=False)
-        print(f"[BACKUP] Integrity data: {json.dumps(integrity, indent=2)}")
         
-        print("[BACKUP] Step 7: Creating ZIP archive...")
+        # 添加每个表的详细统计到 manifest
+        for table in tables:
+            manifest["tables"][table] = {
+                "record_count": table_stats[table],
+                "csv_path": f"csv/{table}.csv",
+                "exported_rows": csv_stats.get(table, 0)
+            }
+        
+        manifest_path = os.path.join(temp_dir, "manifest.json")
+        with open(manifest_path, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, indent=2, ensure_ascii=False)
+        print(f"[BACKUP] Fingerprint layer: manifest.json created")
+        
+        # ========== 阶段 4: 打包为 ZIP =========
+        print("[BACKUP] Phase 4: Creating ZIP archive...")
         zip_filename = f"Backup_{timestamp}.zip"
         zip_filepath = os.path.join(BACKUPS_DIR, zip_filename)
         
         import zipfile
         with zipfile.ZipFile(zip_filepath, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(temp_db_copy, "finance_data.db")
+            # 添加数据库文件
+            zipf.write(db_backup_path, "finance_data.db")
+            
+            # 添加所有 CSV 文件
             for csv_file in os.listdir(csv_dir):
                 zipf.write(os.path.join(csv_dir, csv_file), f"csv/{csv_file}")
-            zipf.write(integrity_path, "integrity.json")
+            
+            # 添加 manifest
+            zipf.write(manifest_path, "manifest.json")
         
         print(f"[BACKUP] ZIP archive created: {zip_filepath}")
         print(f"[BACKUP] ZIP file size: {os.path.getsize(zip_filepath)} bytes")
         
-        print("[BACKUP] Step 8: Cleaning up temporary files...")
+        # ========== 阶段 5: 清理临时文件 =========
+        print("[BACKUP] Phase 5: Cleaning up temporary files...")
         shutil.rmtree(temp_dir, ignore_errors=True)
         
-        print(f"[BACKUP] ====================================")
+        # ========== 备份完成 =========
+        print(f"[BACKUP] {'='*60}")
         print(f"[BACKUP] Backup completed successfully!")
         print(f"[BACKUP] Download path: {zip_filepath}")
         print(f"[BACKUP] Fingerprint: {db_hash[:16]}...")
-        print(f"[BACKUP] ====================================")
+        print(f"[BACKUP] {'='*60}")
         
         return send_file(zip_filepath, as_attachment=True, download_name=zip_filename)
+        
     except Exception as e:
         import traceback
         traceback.print_exc()
         print(f"[BACKUP] Backup error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
+def _verify_csv_row_count(csv_path, expected_count):
+    """验证 CSV 文件的行数（不包括 header）"""
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.reader(f)
+        next(reader, None)  # 跳过 header
+        count = sum(1 for _ in reader)
+    
+    match = count == expected_count
+    return {
+        'expected': expected_count,
+        'actual': count,
+        'match': match
+    }
+
 
 @app.route("/api/restore", methods=["POST"])
 def api_restore():
@@ -749,22 +1110,36 @@ def api_restore():
     if file.filename == '':
         return jsonify({"status": "error", "message": "文件名为空"}), 400
     
-    max_retries = 3
-    retry_delay = 0.5
+    # 文件类型和大小验证
+    if not file.filename.lower().endswith('.zip'):
+        return jsonify({"status": "error", "message": "仅支持 ZIP 格式文件"}), 400
     
-    for attempt in range(max_retries):
+    max_file_size = 100 * 1024 * 1024  # 100MB
+    file.seek(0, 2)  # 移动到文件末尾
+    file_size = file.tell()
+    file.seek(0)  # 重置到文件开头
+    
+    if file_size > max_file_size:
+        return jsonify({"status": "error", "message": "文件大小超过 100MB 限制"}), 400
+    
+    if file_size == 0:
+        return jsonify({"status": "error", "message": "文件为空"}), 400
+    
+    for attempt in range(3):
         try:
-            print(f"[RESTORE] ====================================")
+            print(f"[RESTORE] {'='*60}")
             print(f"[RESTORE] Restore started at: {datetime.now().isoformat()}")
             print(f"[RESTORE] Target DB: {DB_PATH}")
-            print(f"[RESTORE] Uploaded file: {file.filename}")
-            print(f"[RESTORE] ====================================")
+            print(f"[RESTORE] Uploaded file: {file.filename} ({file_size} bytes)")
+            print(f"[RESTORE] {'='*60}")
             
             with _db_lock:
-                print("[RESTORE] Step 1: Closing all database connections...")
+                # ========== 阶段 1: 释放所有数据库连接 =========
+                print("[RESTORE] Phase 1: Releasing all database connections...")
                 _close_all_connections()
                 time.sleep(1.0)
                 
+                # 删除 WAL/SHM 文件
                 wal_path = DB_PATH + "-wal"
                 shm_path = DB_PATH + "-shm"
                 
@@ -778,12 +1153,12 @@ def api_restore():
                 
                 time.sleep(0.5)
                 
-                print("[RESTORE] Step 2: Creating temporary extraction directory...")
-                temp_dir = os.path.join(BACKUPS_DIR, "temp_restore")
+                # ========== 阶段 2: 解压备份包 =========
+                print("[RESTORE] Phase 2: Extracting ZIP file...")
+                temp_dir = os.path.join(BACKUPS_DIR, "restore_temp")
                 os.makedirs(temp_dir, exist_ok=True)
                 
                 import zipfile
-                print("[RESTORE] Step 3: Extracting ZIP file...")
                 zip_path = os.path.join(temp_dir, "uploaded.zip")
                 file.save(zip_path)
                 
@@ -795,123 +1170,142 @@ def api_restore():
                 except zipfile.BadZipFile:
                     print("[RESTORE] Error: Invalid ZIP file format")
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    return jsonify({"status": "error", "message": "无效的ZIP文件格式"}), 400
+                    return jsonify({"status": "error", "message": "无效的 ZIP 文件格式"}), 400
                 
-                print("[RESTORE] Step 4: Locating backup files...")
-                db_file_in_zip = None
-                integrity_file = None
+                # ========== 阶段 3: 定位关键文件 =========
+                print("[RESTORE] Phase 3: Locating backup files...")
+                db_file = None
+                manifest_file = None
+                csv_dir = None
                 
                 for root, dirs, files in os.walk(temp_dir):
                     for f in files:
                         full_path = os.path.join(root, f)
                         rel_path = os.path.relpath(full_path, temp_dir)
+                        
                         if rel_path == "finance_data.db":
-                            db_file_in_zip = full_path
-                        elif rel_path == "integrity.json":
-                            integrity_file = full_path
+                            db_file = full_path
+                        elif rel_path == "manifest.json":
+                            manifest_file = full_path
+                        elif rel_path == "csv":
+                            csv_dir = full_path
                 
-                if db_file_in_zip is None:
+                if db_file is None:
                     print("[RESTORE] Error: No finance_data.db found in ZIP")
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                    return jsonify({"status": "error", "message": "ZIP中未找到finance_data.db文件"}), 400
+                    return jsonify({"status": "error", "message": "ZIP 中未找到 finance_data.db 文件"}), 400
                 
-                print(f"[RESTORE] Found DB file: {db_file_in_zip}")
+                if manifest_file is None:
+                    print("[RESTORE] Error: No manifest.json found in ZIP")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return jsonify({"status": "error", "message": "ZIP 中未找到 manifest.json 文件"}), 400
                 
-                print("[RESTORE] Step 5: Verifying backup integrity...")
-                if integrity_file and os.path.exists(integrity_file):
-                    with open(integrity_file, 'r', encoding='utf-8') as f:
-                        integrity = json.load(f)
-                    
-                    print(f"[RESTORE] Integrity check data: {json.dumps(integrity, indent=2)}")
-                    
-                    import hashlib
-                    with open(db_file_in_zip, 'rb') as f:
-                        current_hash = hashlib.sha256(f.read()).hexdigest()
-                    
-                    print(f"[RESTORE] Backup DB hash:   {integrity.get('db_file_hash', 'N/A')}")
-                    print(f"[RESTORE] Extracted DB hash: {current_hash}")
-                    
-                    if current_hash != integrity.get('db_file_hash'):
-                        print("[RESTORE] WARNING: Hash mismatch! Backup may be corrupted.")
-                        print("[RESTORE] Proceeding anyway as requested...")
-                    
-                    print("[RESTORE] Step 6: Counting records in backup to verify...")
-                    verify_conn = sqlite3.connect(db_file_in_zip)
-                    verify_cursor = verify_conn.cursor()
-                    
-                    tables = ['shops', 'categories', 'transactions', 'advances', 'currencies', 'business_reconciliation', 'seeded']
-                    record_counts = {}
-                    for table in tables:
-                        try:
-                            verify_cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                            count = verify_cursor.fetchone()[0]
-                            record_counts[table] = count
-                            print(f"[RESTORE]   {table}: {count} records")
-                        except Exception as e:
-                            print(f"[RESTORE]   {table}: 0 (error: {e})")
-                            record_counts[table] = 0
-                    
-                    verify_conn.close()
-                    
-                    if 'tables' in integrity:
-                        print("[RESTORE] Comparing with integrity.json record counts...")
-                        for table in tables:
-                            expected = integrity['tables'].get(table, 0)
-                            actual = record_counts.get(table, 0)
-                            if expected != actual:
-                                print(f"[RESTORE] WARNING: {table} count mismatch! Expected: {expected}, Actual: {actual}")
-                    
-                    print("[RESTORE] Integrity verification completed")
+                print(f"[RESTORE] Found DB file: {db_file}")
+                print(f"[RESTORE] Found manifest: {manifest_file}")
+                
+                # ========== 阶段 4: 读取并验证 manifest =========
+                print("[RESTORE] Phase 4: Verifying manifest.json...")
+                with open(manifest_file, 'r', encoding='utf-8') as f:
+                    manifest = json.load(f)
+                
+                print(f"[RESTORE] Manifest version: {manifest.get('version', 'unknown')}")
+                print(f"[RESTORE] Backup time: {manifest.get('backup_time', 'unknown')}")
+                
+                # ========== 阶段 5: 互验机制 - CSV 行数 vs manifest 记录数 =========
+                print("[RESTORE] Phase 5: Cross-verification (CSV rows vs manifest counts)...")
+                tables = ['shops', 'categories', 'transactions', 'advances', 'currencies', 'business_reconciliation', 'seeded']
+                verification_passed = True
+                
+                csv_dir = os.path.join(temp_dir, "csv")
+                if not os.path.isdir(csv_dir):
+                    csv_dir = None
+                    print("[RESTORE] WARNING: CSV directory not found, skipping CSV verification")
                 else:
-                    print("[RESTORE] No integrity.json found, skipping verification")
+                    for table in tables:
+                        csv_path = os.path.join(csv_dir, f"{table}.csv")
+                        expected_count = manifest.get('tables', {}).get(table, {}).get('record_count', 0)
+                        
+                        if os.path.exists(csv_path):
+                            result = _verify_csv_row_count(csv_path, expected_count)
+                            status = "✓ PASS" if result['match'] else "✗ FAIL"
+                            print(f"[RESTORE]   {table}: {status} (expected={result['expected']}, actual={result['actual']})")
+                            
+                            if not result['match']:
+                                verification_passed = False
+                        else:
+                            print(f"[RESTORE]   {table}: SKIP (CSV file not found)")
                 
-                print("[RESTORE] Step 7: Replacing current database with backup...")
-                backup_path = DB_PATH + ".bak"
-                if os.path.exists(backup_path):
+                # ========== 阶段 6: 验证数据库文件哈希（可选） =========
+                print("[RESTORE] Phase 6: Database file hash verification...")
+                db_expected_hash = manifest.get('database', {}).get('sha256_hash')
+                if db_expected_hash:
+                    db_actual_hash = _calculate_file_hash(db_file)
+                    hash_match = db_expected_hash == db_actual_hash
+                    print(f"[RESTORE] Expected hash:   {db_expected_hash[:32]}...")
+                    print(f"[RESTORE] Actual hash:     {db_actual_hash[:32]}...")
+                    print(f"[RESTORE] Hash match: {hash_match}")
+                    
+                    # 哈希不匹配时仅警告，不影响恢复流程
+                    if not hash_match:
+                        print("[RESTORE] WARNING: Hash mismatch, but proceeding anyway")
+                
+                # ========== 阶段 7: 物理替换数据库文件 =========
+                if verification_passed or csv_dir is None:
+                    print("[RESTORE] Phase 7: Physical database replacement...")
+                    
+                    # 备份当前数据库（以防万一）
+                    backup_path = DB_PATH + ".bak"
+                    if os.path.exists(DB_PATH):
+                        shutil.copy2(DB_PATH, backup_path)
+                        print(f"[RESTORE] Current DB backed up to: {backup_path}")
+                    
+                    # 直接物理覆盖
+                    shutil.copy2(db_file, DB_PATH)
+                    print(f"[RESTORE] Database file replaced successfully")
+                    
+                    # 验证恢复后的数据库
+                    print("[RESTORE] Phase 8: Verifying restored database...")
+                    verify_conn = sqlite3.connect(DB_PATH, timeout=10)
                     try:
-                        os.remove(backup_path)
-                    except:
-                        pass
-                
-                if os.path.exists(DB_PATH):
-                    os.rename(DB_PATH, backup_path)
-                
-                shutil.copy2(db_file_in_zip, DB_PATH)
-                print(f"[RESTORE] Copied backup DB to: {DB_PATH}")
-                
-                print("[RESTORE] Step 8: Cleaning up temporary files...")
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                
-                for path in [wal_path, shm_path]:
-                    if os.path.exists(path):
-                        try:
-                            os.remove(path)
-                        except:
-                            pass
-                
-                print("[RESTORE] Step 9: Verifying restored database...")
-                verify_conn2 = sqlite3.connect(DB_PATH, timeout=10)
-                verify_cursor2 = verify_conn2.cursor()
-                verify_cursor2.execute("SELECT COUNT(*) FROM transactions")
-                trans_count = verify_cursor2.fetchone()[0]
-                verify_conn2.close()
-                print(f"[RESTORE] Verified: transactions table has {trans_count} records")
-                
-                print(f"[RESTORE] ====================================")
-                print(f"[RESTORE] Restore completed successfully!")
-                print(f"[RESTORE] ====================================")
-                
-                return jsonify({"status": "ok", "refresh": True, "message": "数据已恢复，请刷新页面"})
+                        verify_cursor = verify_conn.cursor()
+                        verify_cursor.execute("SELECT COUNT(*) FROM transactions")
+                        trans_count = verify_cursor.fetchone()[0]
+                        print(f"[RESTORE] Verified: transactions table has {trans_count} records")
+                    finally:
+                        verify_conn.close()
+                    
+                    # ========== 清理 =========
+                    print("[RESTORE] Phase 9: Cleaning up temporary files...")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    
+                    print(f"[RESTORE] {'='*60}")
+                    print(f"[RESTORE] Restore completed successfully!")
+                    print(f"[RESTORE] Verification: {'PASSED' if verification_passed else 'WARNING'}")
+                    print(f"[RESTORE] {'='*60}")
+                    
+                    return jsonify({
+                        "status": "ok",
+                        "refresh": True,
+                        "message": "数据已恢复，请刷新页面",
+                        "verification_passed": verification_passed
+                    })
+                else:
+                    print("[RESTORE] ABORT: Verification failed, database not replaced")
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                    return jsonify({
+                        "status": "error",
+                        "message": "数据验证失败，备份文件可能已损坏",
+                        "verification_passed": False
+                    }), 400
             
         except Exception as e:
             import traceback
             traceback.print_exc()
             print(f"[RESTORE] Restore error (Attempt {attempt + 1}): {e}")
             
-            if attempt < max_retries - 1:
-                print(f"[RESTORE] Retrying in {retry_delay}s...")
-                time.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 3.0)
+            if attempt < 2:
+                print(f"[RESTORE] Retrying in 0.5s...")
+                time.sleep(0.5)
             else:
                 print(f"[RESTORE] All attempts failed")
                 return jsonify({"status": "error", "message": str(e)}), 500

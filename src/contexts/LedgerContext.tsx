@@ -1,6 +1,16 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useState, ReactNode } from "react";
 import { Advance, Category, CurrencyCode, CurrencyDef, Shipment, Shop, Transaction, WAREHOUSE_SHOP, WAREHOUSE_SHOP_ID } from "@/lib/types";
-import { seedIfEmpty, storage, uid } from "@/lib/storage";
+import {
+  fetchShops, saveShops,
+  fetchCategories, saveCategories,
+  fetchTransactions, saveTransactions,
+  fetchAdvances, saveAdvances,
+  fetchCurrencies, saveCurrencies,
+  fetchShipments, saveShipment, deleteShipmentApi,
+  apiCall,
+} from "@/lib/api";
+import { uid } from "@/lib/storage";
+import { toast } from "sonner";
 
 interface LedgerContextValue {
   shops: Shop[];
@@ -12,6 +22,8 @@ interface LedgerContextValue {
   shipments: Shipment[];
   currencies: CurrencyDef[];
   currencyMap: Map<CurrencyCode, CurrencyDef>;
+  /** 数据加载状态 */
+  loading: boolean;
   // shops
   addShop: (s: Omit<Shop, "id" | "createdAt">) => void;
   updateShop: (id: string, patch: Partial<Shop>) => void;
@@ -53,127 +65,216 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
   const [advances, setAdvances] = useState<Advance[]>([]);
   const [shipments, setShipments] = useState<Shipment[]>([]);
   const [currencies, setCurrencies] = useState<CurrencyDef[]>([]);
-  const [hydrated, setHydrated] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    seedIfEmpty();
-    setShops(storage.getShops());
-    setCategories(storage.getCategories());
-    setTransactions(storage.getTransactions());
-    setAdvances(storage.getAdvances());
-    setShipments(storage.getShipments());
-    setCurrencies(storage.getCurrencies());
-    setHydrated(true);
+  // 初始化时从 API 加载所有数据
+  const loadAllData = useCallback(async () => {
+    try {
+      setLoading(true);
+      const [shopsData, categoriesData, transactionsData, advancesData, currenciesData, shipmentsData] = await Promise.all([
+        fetchShops(),
+        fetchCategories(),
+        fetchTransactions(),
+        fetchAdvances(),
+        fetchCurrencies(),
+        fetchShipments(),
+      ]);
+
+      setShops(shopsData);
+      setCategories(categoriesData);
+      setTransactions(transactionsData);
+      setAdvances(advancesData);
+      setCurrencies(currenciesData);
+      setShipments(shipmentsData);
+    } catch (error) {
+      console.error("Failed to load data:", error);
+      toast.error("加载数据失败，请刷新页面重试");
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  useEffect(() => { if (hydrated) storage.setShops(shops); }, [shops, hydrated]);
-  useEffect(() => { if (hydrated) storage.setCategories(categories); }, [categories, hydrated]);
-  useEffect(() => { if (hydrated) storage.setTransactions(transactions); }, [transactions, hydrated]);
-  useEffect(() => { if (hydrated) storage.setAdvances(advances); }, [advances, hydrated]);
-  useEffect(() => { if (hydrated) storage.setShipments(shipments); }, [shipments, hydrated]);
-  useEffect(() => { if (hydrated) storage.setCurrencies(currencies); }, [currencies, hydrated]);
+  useMemo(() => {
+    loadAllData();
+  }, [loadAllData]);
+
+  // 数据变更时同步到后端 API
+  const saveShopsToApi = useCallback(async (newShops: Shop[]) => {
+    await apiCall(() => saveShops(newShops), {
+      errorMessage: "保存店铺失败",
+      maxRetries: 3,
+    });
+  }, []);
+
+  const saveCategoriesToApi = useCallback(async (newCategories: Category[]) => {
+    await apiCall(() => saveCategories(newCategories), {
+      errorMessage: "保存分类失败",
+      maxRetries: 3,
+    });
+  }, []);
+
+  const saveTransactionsToApi = useCallback(async (newTransactions: Transaction[]) => {
+    await apiCall(() => saveTransactions(newTransactions), {
+      errorMessage: "保存交易失败",
+      maxRetries: 3,
+    });
+  }, []);
+
+  const saveAdvancesToApi = useCallback(async (newAdvances: Advance[]) => {
+    await apiCall(() => saveAdvances(newAdvances), {
+      errorMessage: "保存垫付失败",
+      maxRetries: 3,
+    });
+  }, []);
+
+  const saveCurrenciesToApi = useCallback(async (newCurrencies: CurrencyDef[]) => {
+    await apiCall(() => saveCurrencies(newCurrencies), {
+      errorMessage: "保存货币失败",
+      maxRetries: 3,
+    });
+  }, []);
 
   const addShop: LedgerContextValue["addShop"] = useCallback((s) => {
-    setShops((prev) => [...prev, { ...s, id: uid(), createdAt: new Date().toISOString() }]);
-  }, []);
+    const newShop = { ...s, id: uid(), createdAt: new Date().toISOString() };
+    setShops((prev) => {
+      const updated = [...prev, newShop];
+      saveShopsToApi(updated);
+      return updated;
+    });
+  }, [saveShopsToApi]);
+
   const updateShop: LedgerContextValue["updateShop"] = useCallback((id, patch) => {
-    setShops((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-  }, []);
+    setShops((prev) => {
+      const updated = prev.map((s) => (s.id === id ? { ...s, ...patch } : s));
+      saveShopsToApi(updated);
+      return updated;
+    });
+  }, [saveShopsToApi]);
+
   const deleteShop: LedgerContextValue["deleteShop"] = useCallback((id) => {
-    setShops((prev) => prev.filter((s) => s.id !== id));
-    setTransactions((prev) => prev.filter((t) => t.shopId !== id));
-  }, []);
+    // 1. 删除店铺
+    setShops((prev) => {
+      const updated = prev.filter((s) => s.id !== id);
+      saveShopsToApi(updated);
+      return updated;
+    });
+    
+    // 2. 同时删除该店铺的交易并同步到 API
+    setTransactions((prev) => {
+      const updated = prev.filter((t) => t.shopId !== id);
+      saveTransactionsToApi(updated);
+      return updated;
+    });
+  }, [saveShopsToApi, saveTransactionsToApi]);
 
   const addCategory: LedgerContextValue["addCategory"] = useCallback((c) => {
-    setCategories((prev) => [...prev, { ...c, id: uid() }]);
-  }, []);
+    const newCategory = { ...c, id: uid() };
+    setCategories((prev) => {
+      const updated = [...prev, newCategory];
+      saveCategoriesToApi(updated);
+      return updated;
+    });
+  }, [saveCategoriesToApi]);
+
   const updateCategory: LedgerContextValue["updateCategory"] = useCallback((id, patch) => {
-    setCategories((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c)));
-  }, []);
+    setCategories((prev) => {
+      const updated = prev.map((c) => (c.id === id ? { ...c, ...patch } : c));
+      saveCategoriesToApi(updated);
+      return updated;
+    });
+  }, [saveCategoriesToApi]);
+
   const deleteCategory: LedgerContextValue["deleteCategory"] = useCallback((id) => {
-    setCategories((prev) => prev.filter((c) => c.id !== id));
-  }, []);
+    setCategories((prev) => {
+      const updated = prev.filter((c) => c.id !== id);
+      saveCategoriesToApi(updated);
+      return updated;
+    });
+  }, [saveCategoriesToApi]);
 
   const addTransaction: LedgerContextValue["addTransaction"] = useCallback((t) => {
-    setTransactions((prev) => [{ ...t, id: uid(), createdAt: new Date().toISOString() }, ...prev]);
-  }, []);
+    const newTx = { ...t, id: uid(), createdAt: new Date().toISOString() };
+    setTransactions((prev) => {
+      const updated = [newTx, ...prev];
+      saveTransactionsToApi(updated);
+      return updated;
+    });
+  }, [saveTransactionsToApi]);
+
   const updateTransaction: LedgerContextValue["updateTransaction"] = useCallback((id, patch) => {
-    setTransactions((prev) => prev.map((t) => (t.id === id ? { ...t, ...patch } : t)));
-  }, []);
+    setTransactions((prev) => {
+      const updated = prev.map((t) => (t.id === id ? { ...t, ...patch } : t));
+      saveTransactionsToApi(updated);
+      return updated;
+    });
+  }, [saveTransactionsToApi]);
+
   const deleteTransaction: LedgerContextValue["deleteTransaction"] = useCallback((id) => {
-    setTransactions((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+    setTransactions((prev) => {
+      const updated = prev.filter((t) => t.id !== id);
+      saveTransactionsToApi(updated);
+      return updated;
+    });
+  }, [saveTransactionsToApi]);
+
   const deleteTransactions: LedgerContextValue["deleteTransactions"] = useCallback((ids) => {
-    const set = new Set(ids);
-    setTransactions((prev) => prev.filter((t) => !set.has(t.id)));
-  }, []);
+    const idSet = new Set(ids);
+    setTransactions((prev) => {
+      const updated = prev.filter((t) => !idSet.has(t.id));
+      saveTransactionsToApi(updated);
+      return updated;
+    });
+  }, [saveTransactionsToApi]);
 
   const addAdvance: LedgerContextValue["addAdvance"] = useCallback((a) => {
-    setAdvances((prev) => [{ ...a, id: uid(), createdAt: new Date().toISOString() }, ...prev]);
-  }, []);
+    const newAdvance = { ...a, id: uid(), createdAt: new Date().toISOString() };
+    setAdvances((prev) => {
+      const updated = [newAdvance, ...prev];
+      saveAdvancesToApi(updated);
+      return updated;
+    });
+  }, [saveAdvancesToApi]);
+
   const updateAdvance: LedgerContextValue["updateAdvance"] = useCallback((id, patch) => {
-    setAdvances((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)));
-  }, []);
+    setAdvances((prev) => {
+      const updated = prev.map((a) => (a.id === id ? { ...a, ...patch } : a));
+      saveAdvancesToApi(updated);
+      return updated;
+    });
+  }, [saveAdvancesToApi]);
+
   const deleteAdvance: LedgerContextValue["deleteAdvance"] = useCallback((id) => {
-    setAdvances((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+    setAdvances((prev) => {
+      const updated = prev.filter((a) => a.id !== id);
+      saveAdvancesToApi(updated);
+      return updated;
+    });
+  }, [saveAdvancesToApi]);
+
   const deleteAdvances: LedgerContextValue["deleteAdvances"] = useCallback((ids) => {
-    const set = new Set(ids);
-    setAdvances((prev) => prev.filter((a) => !set.has(a.id)));
+    const idSet = new Set(ids);
+    setAdvances((prev) => {
+      const updated = prev.filter((a) => !idSet.has(a.id));
+      saveAdvancesToApi(updated);
+      return updated;
+    });
+  }, [saveAdvancesToApi]);
+
+  // Shipments - 这些已经在使用 API，保持但稍作调整
+  const addShipment: LedgerContextValue["addShipment"] = useCallback(async (s) => {
+    const result = await saveShipment(s);
+    const newShipment = { ...s, id: result.id, createdAt: new Date().toISOString() };
+    setShipments((prev) => [newShipment, ...prev]);
   }, []);
 
-  const addShipment: LedgerContextValue["addShipment"] = useCallback(async (s) => {
-    try {
-      const response = await fetch("/api/reconciliation/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(s),
-      });
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || "保存失败");
-      }
-      const result = await response.json();
-      const newShipment = { ...s, id: result.id, createdAt: new Date().toISOString() };
-      setShipments((prev) => [newShipment, ...prev]);
-    } catch (error) {
-      console.error("Failed to add shipment:", error);
-      throw error;
-    }
-  }, []);
   const updateShipment: LedgerContextValue["updateShipment"] = useCallback(async (id, patch) => {
-    try {
-      const response = await fetch("/api/reconciliation/save", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id, ...patch }),
-      });
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || "更新失败");
-      }
-      setShipments((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
-    } catch (error) {
-      console.error("Failed to update shipment:", error);
-      throw error;
-    }
+    await saveShipment({ id, ...patch });
+    setShipments((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
   }, []);
+
   const deleteShipment: LedgerContextValue["deleteShipment"] = useCallback(async (id) => {
-    try {
-      const response = await fetch("/api/reconciliation/delete", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id }),
-      });
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.message || "删除失败");
-      }
-      setShipments((prev) => prev.filter((s) => s.id !== id));
-    } catch (error) {
-      console.error("Failed to delete shipment:", error);
-      throw error;
-    }
+    await deleteShipmentApi(id);
+    setShipments((prev) => prev.filter((s) => s.id !== id));
   }, []);
 
   const addCurrency: LedgerContextValue["addCurrency"] = useCallback((c) => {
@@ -182,26 +283,40 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     if (!c.symbol.trim()) return { ok: false, error: "请填写货币符号" };
     if (!c.name.trim()) return { ok: false, error: "请填写货币名称" };
     if (!c.defaultRate || c.defaultRate <= 0) return { ok: false, error: "请填写有效的默认汇率" };
+    
     let result: { ok: boolean; error?: string } = { ok: true };
     setCurrencies((prev) => {
       if (prev.some((x) => x.code === code)) {
         result = { ok: false, error: `货币 ${code} 已存在` };
         return prev;
       }
-      return [...prev, { ...c, code, isBase: false }];
+      const updated = [...prev, { ...c, code, isBase: false }];
+      saveCurrenciesToApi(updated);
+      return updated;
     });
     return result;
-  }, []);
+  }, [saveCurrenciesToApi]);
+
   const updateCurrency: LedgerContextValue["updateCurrency"] = useCallback((code, patch) => {
-    setCurrencies((prev) => prev.map((c) => (c.code === code ? { ...c, ...patch } : c)));
-  }, []);
+    setCurrencies((prev) => {
+      const updated = prev.map((c) => (c.code === code ? { ...c, ...patch } : c));
+      saveCurrenciesToApi(updated);
+      return updated;
+    });
+  }, [saveCurrenciesToApi]);
+
   const deleteCurrency: LedgerContextValue["deleteCurrency"] = useCallback((code) => {
     if (code === "CNY") return { ok: false, error: "本位币不可删除" };
     const used = transactions.some((t) => t.currency === code);
     if (used) return { ok: false, error: "该货币下还有交易记录，无法删除" };
-    setCurrencies((prev) => prev.filter((c) => c.code !== code));
+    
+    setCurrencies((prev) => {
+      const updated = prev.filter((c) => c.code !== code);
+      saveCurrenciesToApi(updated);
+      return updated;
+    });
     return { ok: true };
-  }, [transactions]);
+  }, [transactions, saveCurrenciesToApi]);
 
   const allShops = useMemo(() => [...shops, WAREHOUSE_SHOP], [shops]);
   const shopMap = useMemo(() => {
@@ -209,11 +324,13 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     m.set(WAREHOUSE_SHOP_ID, WAREHOUSE_SHOP);
     return m;
   }, [shops]);
+  
   const catMap = useMemo(() => new Map(categories.map((c) => [c.id, c])), [categories]);
   const currencyMap = useMemo(() => new Map(currencies.map((c) => [c.code, c])), [currencies]);
 
   const value: LedgerContextValue = {
     shops, allShops, categories, transactions, advances, shipments, currencies, currencyMap,
+    loading,
     addShop, updateShop, deleteShop,
     addCategory, updateCategory, deleteCategory,
     addTransaction, updateTransaction, deleteTransaction, deleteTransactions,
@@ -224,6 +341,17 @@ export function LedgerProvider({ children }: { children: ReactNode }) {
     getCategory: (id) => catMap.get(id),
     getCurrency: (code) => currencyMap.get(code),
   };
+
+  if (loading) {
+    return (
+      <div className="flex h-screen w-full items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+          <p className="mt-4 text-sm text-muted-foreground">加载数据中...</p>
+        </div>
+      </div>
+    );
+  }
 
   return <LedgerContext.Provider value={value}>{children}</LedgerContext.Provider>;
 }

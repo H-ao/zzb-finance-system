@@ -48,28 +48,17 @@ export default function Shops() {
     );
   }, [stats, searchTerm]);
 
-  const remainder = filteredStats.length % PAGE_SIZE;
-  const totalPages = remainder === 0
-    ? Math.ceil(filteredStats.length / PAGE_SIZE) + 1
-    : Math.ceil(filteredStats.length / PAGE_SIZE);
+  // 计算总页数：每页固定 9 个
+  const totalPages = Math.max(1, Math.ceil(filteredStats.length / PAGE_SIZE));
 
   const paginatedStats = useMemo(() => {
     const start = (currentPage - 1) * PAGE_SIZE;
     const end = start + PAGE_SIZE;
+    return filteredStats.slice(start, end);
+  }, [filteredStats, currentPage]);
 
-    if (currentPage < totalPages) {
-      return filteredStats.slice(start, end);
-    }
-
-    if (currentPage === totalPages && remainder === 0) {
-      return [];
-    }
-
-    return filteredStats.slice(start, Math.min(end, filteredStats.length));
-  }, [filteredStats, currentPage, totalPages, remainder]);
-
-  const isLastPage = currentPage === totalPages || (totalPages === 0 && filteredStats.length === 0);
-  const showAddCard = isLastPage && paginatedStats.length < PAGE_SIZE;
+  // 是否显示新增卡片：仅当当前页少于 9 个或数据为空时显示
+  const showAddCard = paginatedStats.length < PAGE_SIZE;
 
   const goToPage = (page: number) => {
     if (page >= 1 && page <= totalPages) {
@@ -82,18 +71,52 @@ export default function Shops() {
     setCurrentPage(1);
   };
 
+  // 键盘快捷键翻页
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // 如果用户在输入框中，不响应快捷键
+      if (e.target instanceof HTMLInputElement) return;
+      
+      if (e.key === 'ArrowLeft' && currentPage > 1) {
+        e.preventDefault();
+        goToPage(currentPage - 1);
+      } else if (e.key === 'ArrowRight' && currentPage < totalPages) {
+        e.preventDefault();
+        goToPage(currentPage + 1);
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [currentPage, totalPages]);
+
   function openNew() {
-    setEditing(null);
-    setName("");
-    setColor(PRESET_COLORS[0]);
-    setOpen(true);
+    // 如果当前页已满 9 个，跳转到下一页再打开弹窗
+    if (paginatedStats.length >= PAGE_SIZE) {
+      const nextPage = currentPage + 1;
+      setCurrentPage(nextPage);
+      // 等待状态更新后再打开弹窗
+      setTimeout(() => {
+        setEditing(null);
+        setName("");
+        setColor(PRESET_COLORS[0]);
+        setOpen(true);
+      }, 50);
+    } else {
+      setEditing(null);
+      setName("");
+      setColor(PRESET_COLORS[0]);
+      setOpen(true);
+    }
   }
+  
   function openEdit(s: Shop) {
     setEditing(s);
     setName(s.name);
     setColor(s.color);
     setOpen(true);
   }
+  
   function save() {
     if (!name.trim()) return toast.error("请输入店铺名称");
     if (editing) {
@@ -104,7 +127,16 @@ export default function Shops() {
       toast.success("已新增店铺");
     }
     setOpen(false);
+    // 新增后如果当前页已满，自动跳转到新店铺所在的页
+    if (!editing) {
+      const newTotal = filteredStats.length + 1;
+      const newLastPage = Math.max(1, Math.ceil(newTotal / PAGE_SIZE));
+      if (newTotal > PAGE_SIZE && paginatedStats.length >= PAGE_SIZE) {
+        setCurrentPage(newLastPage);
+      }
+    }
   }
+  
   function remove(s: Shop) {
     if (!confirm(`删除店铺「${s.name}」?该店铺下的所有交易也将被删除。`)) return;
     deleteShop(s.id);
@@ -217,17 +249,23 @@ export default function Shops() {
             <ChevronLeft className="h-4 w-4" />
           </Button>
           <div className="flex items-center gap-1">
-            {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
-              <Button
-                key={page}
-                variant={currentPage === page ? "default" : "ghost"}
-                size="sm"
-                className="w-8"
-                onClick={() => goToPage(page)}
-              >
-                {page}
-              </Button>
-            ))}
+            {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+              const page = i + 1;
+              return (
+                <Button
+                  key={page}
+                  variant={currentPage === page ? "default" : "ghost"}
+                  size="sm"
+                  className="w-8"
+                  onClick={() => goToPage(page)}
+                >
+                  {page}
+                </Button>
+              );
+            })}
+            {totalPages > 7 && (
+              <span className="px-2 text-muted-foreground">...</span>
+            )}
           </div>
           <Button
             variant="outline"
