@@ -6,16 +6,19 @@
 
 - **店铺管理**：支持多店铺管理，3x3 网格布局展示
 - **交易记录**：收入/支出记录管理，支持分类统计
-- **备份恢复**：双轨互验备份机制，支持一键备份和恢复
+- **备份恢复**：三件套备份机制（物理 + 逻辑 + 指纹），支持一键备份和恢复
 - **自动备份**：可配置定时自动备份功能
 - **数据统计**：仪表盘展示收支趋势和店铺对比
+- **窗口模式**：支持原生应用窗口或浏览器模式
+- **EXE 打包**：一键打包成独立可执行文件
 
 ## 技术栈
 
 - **前端**：React 18 + TypeScript + Vite
 - **后端**：Flask + SQLite
 - **UI**：Shadcn/ui + TailwindCSS
-- **图表**：Chart.js
+- **图表**：Recharts
+- **窗口框架**: pywebview
 
 ## 快速开始
 
@@ -34,15 +37,56 @@ pip install -r requirements.txt
 npm install
 ```
 
-### 启动开发服务器
+### 启动方式
+
+#### 方式 1: 浏览器模式（默认）
 
 ```bash
-# 启动后端（端口 5000）
 python main.py
-
-# 启动前端（端口 8080）
-npm run dev
 ```
+
+自动在浏览器中打开 http://127.0.0.1:5000
+
+#### 方式 2: 窗口模式
+
+```bash
+python main.py --windowed
+# 或
+python app_windowed.py
+```
+
+创建独立的应用窗口（类似原生应用）
+
+#### 方式 3: 自定义配置
+
+```bash
+python main.py --port 8080 --host 0.0.0.0
+```
+
+#### 方式 4: 使用 EXE（Windows）
+
+```bash
+# 双击运行
+dist\店铺账目管理系统.exe
+```
+
+### 可选：打包成 EXE
+
+**Windows 用户**:
+```bash
+# 双击运行打包脚本
+build_exe.bat
+```
+
+**Mac/Linux 用户**:
+```bash
+chmod +x build_exe.sh
+./build_exe.sh
+```
+
+打包完成后在 `dist/` 目录找到可执行文件。
+
+详见：[PACKAGING_GUIDE.md](PACKAGING_GUIDE.md)
 
 ### 项目结构
 

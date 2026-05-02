@@ -21,6 +21,13 @@ try:
 except ImportError:
     PANDAS_AVAILABLE = False
 
+# 检查是否使用窗口模式
+try:
+    import webview
+    WEBVIEW_AVAILABLE = True
+except ImportError:
+    WEBVIEW_AVAILABLE = False
+
 # ========== 日志配置 ==========
 logging.basicConfig(
     level=logging.INFO,
@@ -1505,32 +1512,58 @@ def monitor_heartbeat():
             os._exit(0)
 
 def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='店铺账目管理系统')
+    parser.add_argument('--windowed', '-w', action='store_true', 
+                       help='以窗口模式启动（原生应用窗口）')
+    parser.add_argument('--port', '-p', type=int, default=5000,
+                       help='服务器端口（默认：5000）')
+    parser.add_argument('--host', type=str, default='127.0.0.1',
+                       help='服务器监听地址（默认：127.0.0.1）')
+    args = parser.parse_args()
+    
     print("=" * 60)
-    print(f"CRITICAL: Database is running at: {DB_PATH}")
+    print("店铺账目管理系统 v2.0.0")
     print("=" * 60)
+    print(f"Database path: {DB_PATH}")
+    print("=" * 60)
+    
     init_db()
 
     if not is_seeded():
         print("Initializing sample data...")
         seed_data()
-        print("Sample data initialized!")
-
-    print("Heartbeat monitor disabled to prevent auto-shutdown")
+        print("✓ Sample data initialized!")
 
     print(f"Starting auto backup thread (interval: {auto_backup_interval_hours} hours)...")
     auto_backup_thread = threading.Thread(target=auto_backup, daemon=True)
     auto_backup_thread.start()
 
-    print("Starting Flask server...")
+    # 判断启动模式
+    if args.windowed and WEBVIEW_AVAILABLE:
+        # 窗口模式
+        print(f"Starting server in windowed mode on http://{args.host}:{args.port}...")
+        app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
+    else:
+        # 浏览器模式或 webview 不可用时降级
+        if args.windowed and not WEBVIEW_AVAILABLE:
+            print("⚠ Warning: webview not available, falling back to browser mode")
+            print("  Install with: pip install pywebview")
+        
+        print(f"Starting server on http://{args.host}:{args.port}...")
+        print("Press Ctrl+C to stop")
+        
+        # 在浏览器中打开
+        threading.Thread(target=lambda: webbrowser.open(f"http://{args.host}:{args.port}"), daemon=True).start()
+        
+        try:
+            app.run(host=args.host, port=args.port, debug=False)
+        except KeyboardInterrupt:
+            print("\n\nShutting down gracefully...")
+            _close_all_connections()
+            print("✓ Shutdown complete")
 
-    # try:
-    #     subprocess.run(['start', 'chrome', '--app=http://127.0.0.1:5000'], shell=True, check=True)
-    #     print("Chrome app mode launched successfully!")
-    # except Exception as e:
-    #     print(f"Chrome not found, using default browser: {e}")
-    #     webbrowser.open("http://127.0.0.1:5000")
-
-    app.run(host="127.0.0.1", port=5000, debug=False)
 
 if __name__ == "__main__":
     main()
