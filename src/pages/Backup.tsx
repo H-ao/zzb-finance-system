@@ -1,5 +1,5 @@
-import { useState, useEffect } from "react";
-import { Database, Download, RefreshCw, CheckCircle, Clock, Settings } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import { Database, Download, RefreshCw, CheckCircle, Clock, Settings, FileWarning, AlertTriangle } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,6 +15,11 @@ export default function Backup() {
   const [autoBackupEnabled, setAutoBackupEnabled] = useState(false);
   const [autoBackupInterval, setAutoBackupInterval] = useState(6);
   const [configLoading, setConfigLoading] = useState(false);
+  
+  // 新增：恢复文件信息
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [fileInfo, setFileInfo] = useState<{ name: string; size: string; valid: boolean; error?: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     fetchBackupConfig();
@@ -70,22 +75,57 @@ export default function Backup() {
     event.preventDefault();
     if (restoreLoading) return;
 
-    const form = event.target as HTMLFormElement;
-    const fileInput = form.querySelector('input[type="file"]') as HTMLInputElement;
-    if (!fileInput.files?.[0]) {
-      toast.error("请选择备份文件");
+    // 验证文件是否已选择
+    if (!selectedFile) {
+      toast.error("请先选择要恢复的备份文件", {
+        description: "请点击下方虚线框选择 ZIP 格式的备份文件",
+        duration: 5000,
+      });
+      return;
+    }
+
+    // 二次验证：文件大小和类型
+    const maxSize = 100 * 1024 * 1024; // 100MB
+    if (selectedFile.size > maxSize) {
+      toast.error("备份文件过大", {
+        description: "文件大小不能超过 100MB，当前文件大小：" + fileInfo?.size,
+        duration: 5000,
+      });
+      return;
+    }
+
+    if (!selectedFile.name.toLowerCase().endsWith('.zip')) {
+      toast.error("文件格式错误", {
+        description: "请选择 ZIP 格式的备份文件",
+        duration: 5000,
+      });
       return;
     }
 
     setRestoreLoading(true);
+    
+    // 创建进度提示
+    const loadingToastId = Math.random().toString(36).slice(2);
+    
     try {
-      const file = fileInput.files[0];
+      // 阶段 1: 上传文件
+      toast.loading("① 正在上传文件...", {
+        id: loadingToastId,
+        duration: Infinity,
+      });
+      
       const formData = new FormData();
-      formData.append("file", file);
+      formData.append("file", selectedFile);
 
       const response = await fetch("/api/restore", {
         method: "POST",
         body: formData,
+      });
+
+      // 阶段 2: 验证数据
+      toast.loading("② 正在验证数据完整性...", {
+        id: loadingToastId,
+        duration: Infinity,
       });
 
       if (!response.ok) {
@@ -93,26 +133,108 @@ export default function Backup() {
         throw new Error(errorData.message || "恢复失败");
       }
 
+      // 阶段 3: 恢复数据库
+      toast.loading("③ 正在恢复数据库...", {
+        id: loadingToastId,
+        duration: Infinity,
+      });
+
       const result = await response.json();
 
-      if (result.refresh) {
-        toast.success(result.message || "数据已恢复，请刷新页面");
-        setTimeout(() => {
-          window.location.reload();
-        }, 2000);
-      } else {
-        toast.success("恢复成功！数据已更新，请刷新页面查看");
-        setTimeout(() => {
-          window.location.href = window.location.pathname;
-        }, 1500);
-      }
+      // 成功提示
+      toast.success("✅ 恢复成功！", {
+        id: loadingToastId,
+        description: "共恢复 " + (result.stats?.total_records || "多条") + " 条记录，即将刷新页面...",
+        duration: 3000,
+      });
+
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000);
+      
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "恢复失败，请重试");
+      const errorMsg = error instanceof Error ? error.message : "恢复失败";
+      
+      // 详细错误分类
+      let errorDescription = "请稍后重试";
+      if (errorMsg.includes("网络") || errorMsg.includes("fetch")) {
+        errorDescription = "网络连接失败，请检查网络后重试";
+      } else if (errorMsg.includes("ZIP") || errorMsg.includes("格式")) {
+        errorDescription = "备份文件格式不正确或已损坏";
+      } else if (errorMsg.includes("验证") || errorMsg.includes("损坏")) {
+        errorDescription = "备份文件验证失败，可能已损坏";
+      } else if (errorMsg.includes("manifest")) {
+        errorDescription = "备份文件缺少必要信息";
+      }
+      
+      toast.error("❌ " + errorMsg, {
+        id: loadingToastId,
+        description: errorDescription,
+        duration: 8000,
+      });
+      
       console.error("Restore error:", error);
     } finally {
       setRestoreLoading(false);
-      form.reset();
     }
+  }
+
+  // 处理文件选择
+  function handleFileSelect(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) {
+      setSelectedFile(null);
+      setFileInfo(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+      return;
+    }
+
+    // 验证文件
+    const maxSize = 100 * 1024 * 1024;
+    const isZip = file.name.toLowerCase().endsWith('.zip');
+    const sizeMB = (file.size / 1024 / 1024).toFixed(2);
+    
+    let valid = true;
+    let error: string | undefined;
+    
+    if (!isZip) {
+      valid = false;
+      error = "请选择 ZIP 格式的文件";
+      toast.error("文件格式错误", {
+        description: "仅支持 ZIP 格式的备份文件",
+        duration: 5000,
+      });
+    } else if (file.size > maxSize) {
+      valid = false;
+      error = "文件过大（最大 100MB）";
+      toast.error("文件过大", {
+        description: "备份文件不能超过 100MB",
+        duration: 5000,
+      });
+    } else if (file.size === 0) {
+      valid = false;
+      error = "文件为空";
+      toast.error("文件为空", {
+        description: "请选择有效的备份文件",
+        duration: 5000,
+      });
+    } else {
+      // 成功，显示文件信息
+      toast.success("✓ 已选择文件", {
+        description: `${file.name} (${sizeMB} MB)`,
+        duration: 3000,
+      });
+    }
+
+    setSelectedFile(valid ? file : null);
+    setFileInfo({
+      name: file.name,
+      size: `${sizeMB} MB`,
+      valid,
+      error,
+    });
   }
 
   async function handleAutoBackupToggle(checked: boolean) {
@@ -219,27 +341,65 @@ export default function Backup() {
             </p>
             <form onSubmit={handleRestore} className="space-y-4">
               <input
+                ref={fileInputRef}
                 type="file"
                 accept=".zip"
                 className="hidden"
                 id="backup-file"
+                onChange={handleFileSelect}
               />
               <label
                 htmlFor="backup-file"
-                className="flex items-center justify-center gap-2 w-full px-4 py-3 border border-dashed rounded-md cursor-pointer hover:bg-muted transition-colors"
+                className="flex flex-col items-center justify-center gap-2 w-full px-4 py-6 border-2 border-dashed rounded-lg cursor-pointer hover:bg-muted/50 transition-all"
+                style={{
+                  borderColor: fileInfo?.valid === false ? 'hsl(var(--destructive))' : 
+                              fileInfo?.valid === true ? 'hsl(var(--success))' : 
+                              'hsl(var(--border))'
+                }}
               >
-                <Database className="h-5 w-5 text-muted-foreground" />
-                <span className="text-sm">上传 ZIP 备份文件以恢复数据</span>
+                {fileInfo ? (
+                  <>
+                    {fileInfo.valid ? (
+                      <CheckCircle className="h-8 w-8 text-green-600" />
+                    ) : (
+                      <AlertTriangle className="h-8 w-8 text-red-500" />
+                    )}
+                    <div className="text-center">
+                      <p className="font-medium text-sm">{fileInfo.name}</p>
+                      <p className="text-xs text-muted-foreground mt-1">{fileInfo.size}</p>
+                      {!fileInfo.valid && fileInfo.error && (
+                        <p className="text-xs text-red-500 mt-2 flex items-center gap-1 justify-center">
+                          <FileWarning className="h-3 w-3" />
+                          {fileInfo.error}
+                        </p>
+                      )}
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <Database className="h-8 w-8 text-muted-foreground" />
+                    <div className="text-center">
+                      <p className="text-sm font-medium">点击选择 ZIP 备份文件</p>
+                      <p className="text-xs text-muted-foreground mt-1">支持最大 100MB 的 ZIP 文件</p>
+                    </div>
+                  </>
+                )}
               </label>
               <Button
                 type="submit"
-                disabled={restoreLoading}
-                variant="outline"
+                disabled={restoreLoading || !selectedFile}
+                variant={selectedFile && fileInfo?.valid ? "default" : "outline"}
                 className="w-full"
               >
                 <RefreshCw className={`h-4 w-4 mr-2 ${restoreLoading ? "animate-spin" : ""}`} />
-                {restoreLoading ? "恢复中..." : "恢复数据"}
+                {restoreLoading ? "正在恢复..." : !selectedFile ? "请先选择文件" : "确认恢复"}
               </Button>
+              {selectedFile && fileInfo?.valid && (
+                <p className="text-xs text-amber-600 flex items-center gap-1">
+                  <AlertTriangle className="h-3 w-3" />
+                  警告：此操作将永久覆盖当前所有数据
+                </p>
+              )}
             </form>
           </CardContent>
         </Card>
