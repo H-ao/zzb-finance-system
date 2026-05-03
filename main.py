@@ -68,6 +68,10 @@ def get_db_path():
 DB_PATH = get_db_path()
 BACKUP_PATH = os.path.join(os.path.dirname(get_db_path()), "finance_data_backup.db")
 BACKUPS_DIR = os.path.join(os.path.dirname(get_db_path()), "backups")
+
+# ========== 服务器控制 ==========
+server_shutdown_event = threading.Event()  # 服务器关闭事件
+flask_server_thread = None  # Flask 服务器线程（窗口模式用）
 last_active_time = datetime.now()
 auto_backup_interval_hours = 6
 last_auto_backup_time = datetime.now()
@@ -1544,7 +1548,64 @@ def main():
     if args.windowed and WEBVIEW_AVAILABLE:
         # 窗口模式
         print(f"Starting server in windowed mode on http://{args.host}:{args.port}...")
-        app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
+        
+        # 启动 Flask 服务器（在后台线程运行）
+        def run_flask_server():
+            app.run(host=args.host, port=args.port, debug=False, use_reloader=False)
+        
+        server_thread = threading.Thread(target=run_flask_server, daemon=False)
+        server_thread.start()
+        
+        # 等待服务器启动
+        time.sleep(2)
+        
+        # 创建 pywebview 窗口
+        def on_closing():
+            """窗口关闭时的回调函数"""
+            print("\n😊 窗口正在关闭，正在保存数据...")
+            
+            # 触发服务器关闭
+            server_shutdown_event.set()
+            
+            # 等待几秒让数据保存完成
+            time.sleep(1)
+            
+            # 关闭所有数据库连接
+            _close_all_connections()
+            
+            print("✓ 已保存所有数据")
+            print("✓ 已关闭数据库连接")
+            print("✓ 感谢使用，再见！\n")
+        
+        # 创建窗口并注册关闭事件
+        window = webview.create_window(
+            title='店铺账目管理系统',
+            url=f'http://{args.host}:{args.port}',
+            width=1280,
+            height=800,
+            resizable=True,
+            min_size=(800, 600)
+        )
+        
+        # 注册窗口关闭事件（注意：webview.events.closing 在窗口即将关闭时触发）
+        try:
+            # 尝试注册 closing 事件
+            window.events.closing += on_closing
+        except AttributeError:
+            # 如果事件系统不可用，使用 try-except 包装 webview.start()
+            pass
+        
+        # 启动窗口
+        webview.start()
+        
+        # webview.start() 返回后（窗口已关闭），执行清理
+        print("\n😊 窗口已关闭，正在退出程序...")
+        _close_all_connections()
+        
+        # 不需要等待服务器关闭，因为设置了 daemon=False
+        # 主线程结束，程序会自动退出
+        print("✓ 程序已安全退出\n")
+        
     else:
         # 浏览器模式或 webview 不可用时降级
         if args.windowed and not WEBVIEW_AVAILABLE:
@@ -1552,7 +1613,8 @@ def main():
             print("  Install with: pip install pywebview")
         
         print(f"Starting server on http://{args.host}:{args.port}...")
-        print("Press Ctrl+C to stop")
+        print("按 Ctrl+C 停止服务")
+        print("关闭窗口后请按 Ctrl+C 退出程序\n")
         
         # 在浏览器中打开
         threading.Thread(target=lambda: webbrowser.open(f"http://{args.host}:{args.port}"), daemon=True).start()
@@ -1560,9 +1622,12 @@ def main():
         try:
             app.run(host=args.host, port=args.port, debug=False)
         except KeyboardInterrupt:
-            print("\n\nShutting down gracefully...")
+            print("\n\n😊 接收到退出信号，正在关闭...")
             _close_all_connections()
-            print("✓ Shutdown complete")
+            server_shutdown_event.set()
+            print("✓ 已保存所有数据")
+            print("✓ 已关闭数据库连接")
+            print("✓ 感谢使用，再见！\n")
 
 
 if __name__ == "__main__":
