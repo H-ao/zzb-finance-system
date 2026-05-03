@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Plus, Pencil, Trash2, Store as StoreIcon, Calculator, ChevronLeft, ChevronRight } from "lucide-react";
 import { AppLayout } from "@/components/layout/AppLayout";
 import { useLedger } from "@/contexts/LedgerContext";
