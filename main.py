@@ -71,7 +71,6 @@ CORS(app, resources={
 _db_lock = threading.Lock()
 
 # 数据库连接管理（使用 path_manager 提供的路径）
-server_shutdown_event = threading.Event()  # 服务器关闭事件
 flask_server_thread = None  # Flask 服务器线程（窗口模式用）
 last_active_time = datetime.now()
 auto_backup_interval_hours = 6
@@ -1576,11 +1575,8 @@ def main():
             """窗口关闭时的回调函数"""
             print("\n😊 窗口正在关闭，正在保存数据...")
             
-            # 触发服务器关闭
-            server_shutdown_event.set()
-            
             # 等待几秒让数据保存完成
-            time.sleep(1)
+            time.sleep(0.5)
             
             # 关闭所有数据库连接
             _close_all_connections()
@@ -1614,9 +1610,16 @@ def main():
         print("\n😊 窗口已关闭，正在退出程序...")
         _close_all_connections()
         
-        # 不需要等待服务器关闭，因为设置了 daemon=False
-        # 主线程结束，程序会自动退出
+        # 等待服务器线程结束（如果还在运行）
+        if 'server_thread' in locals() and server_thread.is_alive():
+            print("⏳ 等待服务器线程结束...")
+            server_thread.join(timeout=2)
+        
         print("✓ 程序已安全退出\n")
+        
+        # 强制退出程序（确保进程关闭）
+        import sys
+        sys.exit(0)
         
     else:
         # 浏览器模式或 webview 不可用时降级
@@ -1636,7 +1639,6 @@ def main():
         except KeyboardInterrupt:
             print("\n\n😊 接收到退出信号，正在关闭...")
             _close_all_connections()
-            server_shutdown_event.set()
             print("✓ 已保存所有数据")
             print("✓ 已关闭数据库连接")
             print("✓ 感谢使用，再见！\n")
