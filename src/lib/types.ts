@@ -1,6 +1,6 @@
 export type TxType = "income" | "expense";
 
-export type PaymentMethod = "cash" | "wechat" | "alipay" | "bank";
+export type PaymentMethod = "alipay" | "wechat";
 
 /** 货币代码，例如 "CNY" / "THB" / "USD"，用户可自行管理 */
 export type CurrencyCode = string;
@@ -53,10 +53,8 @@ export interface Transaction {
 }
 
 export const PAYMENT_METHOD_LABELS: Record<PaymentMethod, string> = {
-  cash: "现金",
-  wechat: "微信",
   alipay: "支付宝",
-  bank: "银行",
+  wechat: "微信",
 };
 
 export const TX_TYPE_LABELS: Record<TxType, string> = {

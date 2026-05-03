@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 echo ======================================
-echo 店铺账目管理系统 - EXE 打包工具
+echo 店铺账目管理系统 - EXE 打包工具 (调试模式)
 echo 版本：v2.0.2
 echo ======================================
 echo.
@@ -46,10 +46,12 @@ if exist dist rmdir /s /q dist
 if exist *.spec del /q *.spec
 echo.
 
-echo 开始打包 (可能需要 3-5 分钟)...
+echo 开始打包 (调试模式 - 会显示控制台窗口)...
+echo 注意：此模式会显示控制台窗口，便于查看错误日志
+echo.
 pyinstaller ^
-    --name="店铺账目管理系统" ^
-    --windowed ^
+    --name="店铺账目管理系统 - 调试版" ^
+    --console ^
     --onefile ^
     --icon="./logo.ico" ^
     --add-data="dist;dist" ^
@@ -62,17 +64,27 @@ pyinstaller ^
     main.py
 
 echo.
-if exist "dist\店铺账目管理系统.exe" (
+if exist "dist\店铺账目管理系统 - 调试版.exe" (
     echo ======================================
-    echo ✓ 打包完成！
+    echo ✓ 调试版打包完成！
     echo ======================================
-    echo 可执行文件：dist\店铺账目管理系统.exe
-    dir /B "dist\店铺账目管理系统.exe"
+    echo 可执行文件：dist\店铺账目管理系统 - 调试版.exe
+    dir /B "dist\店铺账目管理系统 - 调试版.exe"
     echo ======================================
     echo.
-    echo 测试运行...
-    start "" "dist\店铺账目管理系统.exe"
-    echo 已启动测试，请关闭窗口测试是否正常退出
+    echo 请按以下步骤测试：
+    echo 1. 双击运行 dist\店铺账目管理系统 - 调试版.exe
+    echo 2. 观察黑色控制台窗口的输出
+    echo 3. 如果看到 "Running on http://127.0.0.1:8080" 说明启动成功
+    echo 4. 如果看到错误堆栈，请截图发给我
+    echo.
+    echo 是否现在运行测试？(Y/N)
+    set /p run_now=
+    if /i "%run_now%"=="Y" (
+        echo 已启动测试...
+        echo 请观察黑色控制台的输出，按 Ctrl+C 可以退出
+        start "" "dist\店铺账目管理系统 - 调试版.exe"
+    )
 ) else (
     echo ======================================
     echo ✗ 打包失败

@@ -46,7 +46,19 @@ ALLOWED_ORIGINS = os.environ.get(
 
 logger.info(f"Allowed origins: {ALLOWED_ORIGINS}")
 
-app = Flask(__name__, static_folder="dist", static_url_path="")
+# ========== 统一路径管理 ==========
+from path_manager import path_manager
+
+# 使用统一路径管理器获取所有路径
+DB_PATH = path_manager.get_db_path()
+BACKUP_PATH = path_manager.get_backup_db_path()
+BACKUPS_DIR = path_manager.get_backups_dir()
+
+# Flask 静态文件夹
+STATIC_FOLDER = path_manager.get_static_dir()
+
+app = Flask(__name__, static_folder=STATIC_FOLDER, static_url_path="")
+
 CORS(app, resources={
     r"/api/*": {
         "origins": ALLOWED_ORIGINS,
@@ -58,18 +70,7 @@ CORS(app, resources={
 
 _db_lock = threading.Lock()
 
-def get_db_path():
-    if getattr(sys, 'frozen', False):
-        base_path = os.path.dirname(sys.executable)
-    else:
-        base_path = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_path, "finance_data.db")
-
-DB_PATH = get_db_path()
-BACKUP_PATH = os.path.join(os.path.dirname(get_db_path()), "finance_data_backup.db")
-BACKUPS_DIR = os.path.join(os.path.dirname(get_db_path()), "backups")
-
-# ========== 服务器控制 ==========
+# 数据库连接管理（使用 path_manager 提供的路径）
 server_shutdown_event = threading.Event()  # 服务器关闭事件
 flask_server_thread = None  # Flask 服务器线程（窗口模式用）
 last_active_time = datetime.now()
@@ -410,15 +411,26 @@ def uid():
 
 @app.route("/")
 def index():
-    return send_from_directory(app.static_folder, "index.html")
+    if getattr(sys, 'frozen', False):
+        # 打包后使用绝对路径
+        return send_from_directory(os.path.dirname(get_static_path("")), "index.html")
+    else:
+        # 开发环境
+        return send_from_directory(app.static_folder, "index.html")
 
 @app.route("/<path:path>")
 def catch_all(path):
-    return send_from_directory(app.static_folder, "index.html")
+    if getattr(sys, 'frozen', False):
+        return send_from_directory(os.path.dirname(get_static_path("")), "index.html")
+    else:
+        return send_from_directory(app.static_folder, "index.html")
 
 @app.errorhandler(404)
 def not_found(e):
-    return send_from_directory(app.static_folder, 'index.html')
+    if getattr(sys, 'frozen', False):
+        return send_from_directory(os.path.dirname(get_static_path("")), 'index.html')
+    else:
+        return send_from_directory(app.static_folder, 'index.html')
 
 @app.route("/api/shops", methods=["GET"])
 def get_shops():

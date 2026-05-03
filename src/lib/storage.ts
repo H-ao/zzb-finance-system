@@ -100,7 +100,7 @@ export function seedIfEmpty() {
   const txs: Transaction[] = [];
   const incomeCats = categories.filter((c) => c.type === "income");
   const expenseCats = categories.filter((c) => c.type === "expense");
-  const methods: Transaction["paymentMethod"][] = ["cash", "wechat", "alipay", "bank"];
+  const methods: Transaction["paymentMethod"][] = ["alipay", "wechat"];
 
   for (let d = 0; d < 30; d++) {
     const date = new Date();
