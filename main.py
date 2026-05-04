@@ -71,7 +71,6 @@ CORS(app, resources={
 _db_lock = threading.Lock()
 
 # 数据库连接管理（使用 path_manager 提供的路径）
-flask_server_thread = None  # Flask 服务器线程（窗口模式用）
 last_active_time = datetime.now()
 auto_backup_interval_hours = 6
 last_auto_backup_time = datetime.now()

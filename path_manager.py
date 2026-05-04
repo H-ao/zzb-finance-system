@@ -38,24 +38,23 @@ class PathManager:
             print(f"[PATH]Script path: {os.path.abspath(__file__)}")
             print(f"[PATH]Base path: {self.base_path}")
         
-        # 定义所有关键路径
-        self.db_path = os.path.join(self.base_path, "finance_data.db")
-        self.backup_path = os.path.join(self.base_path, "finance_data_backup.db")
-        self.backups_dir = os.path.join(self.base_path, "backups")
-        
-        # 静态文件目录
-        # 开发环境：使用相对路径 "dist"
-        # 打包后：Flask 会自动从 sys._MEIPASS 读取，所以也使用相对路径
-        self.static_dir = "dist"
-        
-        # 如果打包后，静态文件在 sys._MEIPASS（用于其他需要绝对路径的场景）
+        # 定义所有关键路径（都使用绝对路径）
         if self.frozen:
-            self.static_dir_in_exe = os.path.join(sys._MEIPASS, "dist")
-            # 运行时的 dist 目录（用于写入）
+            # 打包后：所有路径都在 EXE 同级目录
+            self.db_path = os.path.join(self.base_path, "finance_data.db")
+            self.backup_path = os.path.join(self.base_path, "finance_data_backup.db")
+            self.backups_dir = os.path.join(self.base_path, "backups")
+            self.static_dir = "dist"  # Flask 使用相对路径
             self.static_dir_runtime = os.path.join(self.base_path, "dist")
+            self.static_dir_in_exe = os.path.join(sys._MEIPASS, "dist")
         else:
+            # 开发环境：使用相对路径
+            self.db_path = os.path.join(self.base_path, "finance_data.db")
+            self.backup_path = os.path.join(self.base_path, "finance_data_backup.db")
+            self.backups_dir = os.path.join(self.base_path, "backups")
+            self.static_dir = "dist"
+            self.static_dir_runtime = os.path.join(self.base_path, "dist")
             self.static_dir_in_exe = self.static_dir
-            self.static_dir_runtime = self.static_dir
         
         # 确保目录存在
         os.makedirs(self.backups_dir, exist_ok=True)
