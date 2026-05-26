@@ -35,7 +35,7 @@ export default function Shops() {
       const shopShipments = shipments.filter((sh) => sh.shopId === s.id);
       const shipQty = shopShipments.reduce((n, sh) => n + sh.quantity, 0);
       const shipCost = shopShipments.reduce((n, sh) => n + sh.quantity * sh.unitCost, 0);
-      const shipRev = shopShipments.reduce((n, sh) => n + sh.quantity * sh.unitRevenue, 0);
+      const shipRev = shopShipments.reduce((n, sh) => n + sh.quantity * sh.unitRevenue * (sh.profitRate ?? 1), 0);
       const shipProfit = shipRev - shipCost;
       return { shop: s, income, expense, profit: income - expense, count: total, shipQty, shipProfit, shipCount: shopShipments.length };
     });
